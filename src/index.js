@@ -1,4 +1,4 @@
-// Cloudflare Worker with CORS + SQLite Durable Object
+// Cloudflare Worker with CORS + SQLite Durable Object + WS 1006 fixes
 function withCORS(res) {
   const h = new Headers(res.headers);
   h.set('Access-Control-Allow-Origin', '*');
@@ -23,8 +23,7 @@ export default {
       const room = genRoomCode();
       const id = env.ROOM.idFromName(room);
       const obj = env.ROOM.get(id);
-      const res = await obj.fetch('https://do/init', { method:'POST', body: JSON.stringify({ room }) });
-      // ignore DO body (it returns {"room":...}); client只需要 room
+      await obj.fetch('https://do/init', { method:'POST', body: JSON.stringify({ room }) });
       return json({ room });
     }
 
@@ -33,10 +32,8 @@ export default {
     }
 
     // WebSocket (no CORS needed for Upgrade)
-    if (url.pathname === '/ws' && req.headers.get('Upgrade') === 'websocket') {
-      return this.upgradeWS(req, env);
-    }
-    if (url.searchParams.get('room') && req.headers.get('Upgrade') === 'websocket') {
+    const isWS = req.headers.get('Upgrade') === 'websocket';
+    if ((url.pathname === '/ws' || url.searchParams.get('room')) && isWS) {
       return this.upgradeWS(req, env);
     }
 
@@ -50,7 +47,13 @@ export default {
     if(!room) return withCORS(new Response('room required', {status:400}));
     const id = env.ROOM.idFromName(room);
     const obj = env.ROOM.get(id);
-    return obj.fetch(req, { headers:{ 'x-name': name }});
+
+    // IMPORTANT: clone the Request so Upgrade is preserved while overriding headers
+    const headers = new Headers(req.headers);
+    headers.set('x-name', name);
+    const forwarded = new Request(req, { headers });
+
+    return obj.fetch(forwarded);
   }
 };
 
@@ -68,47 +71,86 @@ export class Room {
     this.clients = new Map(); // id -> {ws, name, wins, time}
     this.room = '----';
     this.match = null; // {qn, puzzles:[{nums, par}], started:ts}
+    this.pingTimer = null;
   }
   async fetch(req){
     const url = new URL(req.url);
-    if(req.method === 'OPTIONS'){
-      return withCORS(new Response(null, {status:204}));
-    }
-    if(url.hostname==='do' && url.pathname==='/init' && req.method==='POST'){
-      const j = await req.json();
-      this.room = j.room;
-      return json({ room:this.room });
-    }
-    if(req.headers.get('Upgrade')==='websocket'){
-      const name = req.headers.get('x-name') || 'Guest';
-      const pair = new WebSocketPair(); const client = pair[0]; const server = pair[1];
-      server.accept();
-      const id = crypto.randomUUID();
-      this.clients.set(id, { ws:server, name, wins:0, time:0 });
-      const hello = { type:'hello', id, room:this.room, players:this.playerList() };
-      server.send(JSON.stringify(hello));
-      this.broadcast({ type:'players', players: this.playerList() });
-      server.addEventListener('message', (ev)=>{
-        try{
-          const msg = JSON.parse(ev.data);
-          if(msg.type==='start'){ this.startMatch(); }
-          else if(msg.type==='submit'){ this.handleSubmit(id, msg); }
-        }catch{}
-      });
-      server.addEventListener('close', ()=>{
-        this.clients.delete(id);
+    try {
+      if(req.method === 'OPTIONS'){
+        return withCORS(new Response(null, {status:204}));
+      }
+      if(url.hostname==='do' && url.pathname==='/init' && req.method==='POST'){
+        const j = await req.json();
+        this.room = j.room;
+        console.log('[DO:init]', this.room);
+        return json({ room:this.room });
+      }
+      if(req.headers.get('Upgrade')==='websocket'){
+        const name = req.headers.get('x-name') || 'Guest';
+        const pair = new WebSocketPair(); const client = pair[0]; const server = pair[1];
+        server.accept();
+        const id = crypto.randomUUID();
+        this.clients.set(id, { ws:server, name, wins:0, time:0 });
+
+        console.log('[DO:ws:open]', this.room, id, name, 'clients=', this.clients.size);
+
+        // heartbeat (30s)
+        this.ensureHeartbeat();
+
+        // hello
+        try { server.send(JSON.stringify({ type:'hello', id, room:this.room, players:this.playerList() })); } catch (e) { console.error('send hello fail', e); }
+
+        // broadcast players
         this.broadcast({ type:'players', players: this.playerList() });
-      });
-      return new Response(null, { status: 101, webSocket: client });
+
+        server.addEventListener('message', (ev)=>{
+          try{
+            const msg = JSON.parse(ev.data);
+            if(msg.type==='start'){ this.startMatch(); }
+            else if(msg.type==='submit'){ this.handleSubmit(id, msg); }
+          }catch(e){
+            console.error('[DO:ws:msg:err]', e);
+          }
+        });
+        server.addEventListener('close', (ev)=>{
+          this.clients.delete(id);
+          console.log('[DO:ws:close]', this.room, id, 'code=', ev.code, 'reason=', ev.reason);
+          this.broadcast({ type:'players', players: this.playerList() });
+          this.maybeStopHeartbeat();
+        });
+        server.addEventListener('error', (e)=>{
+          console.error('[DO:ws:error]', e && (e.message||e));
+        });
+
+        return new Response(null, { status: 101, webSocket: client });
+      }
+      return ok('OK Room '+this.room);
+    } catch (e) {
+      console.error('[DO:fetch:error]', e && (e.stack||e));
+      return new Response('Internal Error', { status: 1011 });
     }
-    return ok('OK Room '+this.room);
+  }
+  ensureHeartbeat(){
+    if(this.pingTimer) return;
+    this.pingTimer = setInterval(()=>{
+      const ping = JSON.stringify({ type:'ping', t: Date.now() });
+      for(const v of this.clients.values()){
+        try{ v.ws.send(ping); }catch(e){}
+      }
+    }, 30000);
+  }
+  maybeStopHeartbeat(){
+    if(this.clients.size===0 && this.pingTimer){
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
   }
   playerList(){
     return Array.from(this.clients.entries()).map(([id,v])=>({ id, name:v.name, wins:v.wins, time:v.time }));
   }
   broadcast(obj){
     const s = JSON.stringify(obj);
-    for(const v of this.clients.values()){ try{ v.ws.send(s); }catch{} }
+    for(const v of this.clients.values()){ try{ v.ws.send(s); }catch(e){ console.error('broadcast fail', e); } }
   }
   startMatch(){
     const puzzles = [];
@@ -132,7 +174,6 @@ export class Room {
       this.match=null; return;
     }
     const q = this.match.puzzles[this.match.qn-1];
-    this.qStart = Date.now();
     this.broadcast({ type:'question', qn:this.match.qn, nums:q.nums, par:q.par });
   }
   handleSubmit(id, msg){
@@ -152,7 +193,7 @@ export class Room {
   }
   send(id, obj){
     const v = this.clients.get(id); if(!v) return;
-    try{ v.ws.send(JSON.stringify(obj)); }catch{}
+    try{ v.ws.send(JSON.stringify(obj)); }catch(e){ console.error('send fail', e); }
   }
 }
 
