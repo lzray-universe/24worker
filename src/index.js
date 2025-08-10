@@ -201,18 +201,16 @@ export class Room{
     }
     if(qn<1||qn>10) return;
 
-    const q=this.match.puzzles[qn-1];
-    const expr=(msg.expr||"").toString();
     const t=Math.max(0,Number(msg.time)||0);
+    const ok = !!msg.ok;
 
-    const ok=this.checkExpr(expr,q.nums);
     if(ok){
       v.time+=t;
       v.progress=qn;
       if(v.progress>=10) v.finished=true;
-      this.send(id,{type:"verdict",qn,ok:true,par:q.par,time:t});
+      this.send(id,{type:"verdict",qn,ok:true,par:this.match.puzzles[qn-1].par,time:t});
     }else{
-      this.send(id,{type:"verdict",qn,ok:false,par:q.par,time:t,reason:"错误"});
+      this.send(id,{type:"verdict",qn,ok:false,par:this.match.puzzles[qn-1].par,time:t,reason:"错误"});
     }
 
     this.broadcast({type:"players",players:this.playerList(),hostId:this.hostId});
@@ -257,31 +255,6 @@ export class Room{
       .sort((a,b)=>(a.time-b.time)||a.name.localeCompare(b.name))
       .map((p,i)=>`${i+1}.${p.name}（总时 ${p.time.toFixed(1)}s）`);
     this.broadcast({type:"end",ranking});
-  }
-
-  /* 仅此处改为与单人模式一致的判定 */
-  checkExpr(expr,nums){
-    const numsInExpr = (expr.match(/\d+/g) || []);
-    for(const tok of numsInExpr){
-      const v = Number(tok);
-      if(!(v>=1 && v<=13)) return false;
-    }
-    const pool = nums.slice().map(String);
-    for(const tok of numsInExpr){
-      const idx = pool.indexOf(String(Number(tok)));
-      if(idx === -1) return false;
-      pool.splice(idx,1);
-    }
-    if(pool.length > 0) return false;
-
-    const safe = expr.replace(/÷/g,"/").replace(/×/g,"*");
-    try{
-      const val = Function('"use strict";return ('+ safe +')')();
-      if(!isFinite(val)) return false;
-      return Math.abs(val - 24) < 1e-6;
-    }catch(e){
-      return false;
-    }
   }
 }
 
