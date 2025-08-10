@@ -1,10 +1,10 @@
-name = "twentyfour-realtime"
+name = "24worker"
 main = "src/index.js"
-compatibility_date = "2024-11-01"
+compatibility_date = "2025-07-01"
 
 [durable_objects]
 bindings = [{ name = "ROOM", class_name = "Room" }]
 
 [[migrations]]
 tag = "v1"
-new_classes = ["Room"]
+new_sqlite_classes = ["Room"]

@@ -1,4 +1,4 @@
-// Cloudflare Worker - WebSocket 实时 & Durable Object 房间（自包含）
+// Cloudflare Worker - WebSocket 实时 & Durable Object 房间（SQLite DO 版）
 export default {
   fetch(req, env, ctx) {
     const url = new URL(req.url);
@@ -126,8 +126,8 @@ export class Room {
     try{ v.ws.send(JSON.stringify(obj)); }catch{}
   }
 }
-// Minimal 24-point generator for server
-const OPS = [
+// Minimal 24-point generator
+const OPS2 = [
   { sym: '+', f: (a,b)=>a+b },
   { sym: '-', f: (a,b)=>a-b },
   { sym: '*', f: (a,b)=>a*b },
@@ -137,7 +137,7 @@ function approx(x,y){ return Math.abs(x-y)<1e-6; }
 function* pairs(n){ for(let i=0;i<n;i++) for(let j=i+1;j<n;j++) yield [i,j]; }
 function comb(a,b){
   const r=[];
-  for(const op of OPS){
+  for(const op of OPS2){
     const v1 = op.f(a,b); if(v1!==null) r.push(v1);
     if(op.sym==='-'||op.sym==='/'){ const v2=op.f(b,a); if(v2!==null) r.push(v2); }
   }
@@ -163,10 +163,8 @@ const S24 = {
     let tries=0;
     while(tries++<300){
       const nums=[rnd(1,13),rnd(1,13),rnd(1,13),rnd(1,13)];
-      // quick validity
       const ok = solve(nums);
       if(ok){
-        // cheap exploration counter
         let exp=0;
         function dfs(list){
           exp++;
