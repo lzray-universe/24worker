@@ -1,40 +1,66 @@
-// Cloudflare Worker - WebSocket 实时 & Durable Object 房间（SQLite DO 版）
+// Cloudflare Worker with CORS + SQLite Durable Object
+function withCORS(res) {
+  const h = new Headers(res.headers);
+  h.set('Access-Control-Allow-Origin', '*');
+  h.set('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  h.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  return new Response(res.body, { status: res.status, headers: h });
+}
+function ok(text='OK'){ return withCORS(new Response(text, {status:200})); }
+function notFound(){ return withCORS(new Response('Not found', {status:404})); }
+function json(obj, status=200){
+  return withCORS(new Response(JSON.stringify(obj), {status, headers:{'content-type':'application/json'}}));
+}
+
 export default {
-  fetch(req, env, ctx) {
+  async fetch(req, env, ctx) {
     const url = new URL(req.url);
+    if (req.method === 'OPTIONS') {
+      return withCORS(new Response(null, { status: 204 }));
+    }
+
     if (url.pathname === '/create-room' && req.method === 'POST') {
       const room = genRoomCode();
       const id = env.ROOM.idFromName(room);
       const obj = env.ROOM.get(id);
-      return obj.fetch('https://do/init', { method:'POST', body: JSON.stringify({ room }) });
+      const res = await obj.fetch('https://do/init', { method:'POST', body: JSON.stringify({ room }) });
+      // ignore DO body (it returns {"room":...}); client只需要 room
+      return json({ room });
     }
+
     if (url.pathname === '/' || url.pathname === '/health') {
-      return new Response('OK', { status:200 });
+      return ok('OK');
     }
+
+    // WebSocket (no CORS needed for Upgrade)
     if (url.pathname === '/ws' && req.headers.get('Upgrade') === 'websocket') {
       return this.upgradeWS(req, env);
     }
     if (url.searchParams.get('room') && req.headers.get('Upgrade') === 'websocket') {
       return this.upgradeWS(req, env);
     }
-    return new Response('Not found', { status:404 });
+
+    return notFound();
   },
+
   upgradeWS(req, env) {
     const url = new URL(req.url);
     const room = (url.searchParams.get('room')||'').toUpperCase().trim();
     const name = (url.searchParams.get('name')||'Guest').slice(0,16);
-    if(!room) return new Response('room required', {status:400});
+    if(!room) return withCORS(new Response('room required', {status:400}));
     const id = env.ROOM.idFromName(room);
     const obj = env.ROOM.get(id);
     return obj.fetch(req, { headers:{ 'x-name': name }});
   }
 };
+
 function genRoomCode(){
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let s=''; for(let i=0;i<4;i++) s+=chars[Math.floor(Math.random()*chars.length)];
   return s;
 }
-// Durable Object
+
+// Durable Object (SQLite)
 export class Room {
   constructor(state, env){
     this.state = state;
@@ -45,10 +71,13 @@ export class Room {
   }
   async fetch(req){
     const url = new URL(req.url);
+    if(req.method === 'OPTIONS'){
+      return withCORS(new Response(null, {status:204}));
+    }
     if(url.hostname==='do' && url.pathname==='/init' && req.method==='POST'){
       const j = await req.json();
       this.room = j.room;
-      return new Response(JSON.stringify({ room:this.room }), {headers:{'content-type':'application/json'}});
+      return json({ room:this.room });
     }
     if(req.headers.get('Upgrade')==='websocket'){
       const name = req.headers.get('x-name') || 'Guest';
@@ -72,7 +101,7 @@ export class Room {
       });
       return new Response(null, { status: 101, webSocket: client });
     }
-    return new Response('OK Room '+this.room);
+    return ok('OK Room '+this.room);
   }
   playerList(){
     return Array.from(this.clients.entries()).map(([id,v])=>({ id, name:v.name, wins:v.wins, time:v.time }));
@@ -126,7 +155,8 @@ export class Room {
     try{ v.ws.send(JSON.stringify(obj)); }catch{}
   }
 }
-// Minimal 24-point generator
+
+// Minimal 24-point generator for server
 const OPS2 = [
   { sym: '+', f: (a,b)=>a+b },
   { sym: '-', f: (a,b)=>a-b },
