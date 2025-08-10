@@ -1,4 +1,4 @@
-// Cloudflare Worker with CORS + SQLite Durable Object + WS 1006 fixes
+// Cloudflare Worker with CORS + SQLite DO + WS fix + Auto-clean on empty
 function withCORS(res) {
   const h = new Headers(res.headers);
   h.set('Access-Control-Allow-Origin', '*');
@@ -31,7 +31,6 @@ export default {
       return ok('OK');
     }
 
-    // WebSocket (no CORS needed for Upgrade)
     const isWS = req.headers.get('Upgrade') === 'websocket';
     if ((url.pathname === '/ws' || url.searchParams.get('room')) && isWS) {
       return this.upgradeWS(req, env);
@@ -48,7 +47,7 @@ export default {
     const id = env.ROOM.idFromName(room);
     const obj = env.ROOM.get(id);
 
-    // IMPORTANT: clone the Request so Upgrade is preserved while overriding headers
+    // Preserve Upgrade and add x-name
     const headers = new Headers(req.headers);
     headers.set('x-name', name);
     const forwarded = new Request(req, { headers });
@@ -112,11 +111,21 @@ export class Room {
             console.error('[DO:ws:msg:err]', e);
           }
         });
-        server.addEventListener('close', (ev)=>{
+        server.addEventListener('close', async (ev)=>{
           this.clients.delete(id);
           console.log('[DO:ws:close]', this.room, id, 'code=', ev.code, 'reason=', ev.reason);
+          // Auto-clean when last client leaves
+          if (this.clients.size === 0) {
+            this.maybeStopHeartbeat();
+            try {
+              await this.state.storage.deleteAll();
+              this.match = null;
+              console.log('[DO:room:empty] cleared storage for room', this.room);
+            } catch (e) {
+              console.error('[DO:room:empty:err]', e && (e.stack||e));
+            }
+          }
           this.broadcast({ type:'players', players: this.playerList() });
-          this.maybeStopHeartbeat();
         });
         server.addEventListener('error', (e)=>{
           console.error('[DO:ws:error]', e && (e.message||e));
