@@ -90,6 +90,7 @@ export class Room{
         server.addEventListener("message",(ev)=>{
           try{
             const msg=JSON.parse(ev.data);
+            if(msg.type==="ping"){ this.send(id,{type:"pong",t:Date.now()}); return; }
             if(msg.type==="start") this.onStart(id);
             else if(msg.type==="next") this.onNext(id);
             else if(msg.type==="submit") this.onSubmit(id,msg);
@@ -131,7 +132,7 @@ export class Room{
       for(const v of this.clients.values()){
         try{ v.ws.send(s) }catch(e){}
       }
-    },30000);
+    },10000);
   }
   maybeStopHeartbeat(){
     if(this.clients.size===0&&this.pingTimer){
@@ -258,7 +259,6 @@ export class Room{
   }
 }
 
-/* 题目生成保持不变 */
 const OPS2=[
   {sym:"+",f:(a,b)=>a+b},
   {sym:"-",f:(a,b)=>a-b},
