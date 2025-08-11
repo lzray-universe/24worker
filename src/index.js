@@ -237,6 +237,8 @@ export class Room{
     this.match=null;
     this.broadcast({type:"reset"});
     this.broadcast({type:"players",players:this.playerList(),hostId:this.hostId});
+    // 关键改动：重置后立刻开启新一轮并下发新题
+    this.onStart(id);
   }
 
   allFinished(){
